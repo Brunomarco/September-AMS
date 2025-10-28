@@ -320,7 +320,7 @@ def create_metrics_display(volume, pieces, gross_otp, net_otp, revenue, title):
                 st.markdown(f"- Net On-Time: {debug['net_ontime']:,} / {debug['controllable_shipments']:,} = {net_otp:.1f}%")
 
 def create_top10_charts(df: pd.DataFrame, category: str):
-    """Create top 10 charts for volume and revenue."""
+    """Create top 10 charts for volume and revenue with values displayed."""
     if df.empty or 'ACCT NM' not in df.columns:
         st.warning(f"No data available for {category} charts.")
         return
@@ -335,7 +335,10 @@ def create_top10_charts(df: pd.DataFrame, category: str):
                 x=top_vol.values,
                 y=top_vol.index,
                 orientation='h',
-                marker=dict(color=NAVY)
+                marker=dict(color=NAVY),
+                text=[f'{val:,}' for val in top_vol.values],  # Add formatted text
+                textposition='outside',  # Position text outside the bars
+                textfont=dict(size=11, color=NAVY)
             ))
             fig_vol.update_layout(
                 title=f"Top 10 {category} Accounts by Volume",
@@ -343,7 +346,8 @@ def create_top10_charts(df: pd.DataFrame, category: str):
                 xaxis_title="Shipment Count",
                 yaxis_title="",
                 showlegend=False,
-                margin=dict(l=0, r=0, t=40, b=40)
+                margin=dict(l=0, r=50, t=40, b=40),  # Add right margin for text
+                xaxis=dict(range=[0, max(top_vol.values) * 1.15])  # Extend x-axis for text
             )
             st.plotly_chart(fig_vol, use_container_width=True)
    
@@ -352,11 +356,23 @@ def create_top10_charts(df: pd.DataFrame, category: str):
         if 'TOTAL CHARGES' in df.columns:
             top_rev = df.groupby('ACCT NM')['TOTAL CHARGES'].sum().sort_values(ascending=True).tail(10)
             if not top_rev.empty:
+                # Format revenue text with K or M suffix for readability
+                def format_revenue(val):
+                    if val >= 1_000_000:
+                        return f'${val/1_000_000:.1f}M'
+                    elif val >= 1_000:
+                        return f'${val/1_000:.0f}K'
+                    else:
+                        return f'${val:.0f}'
+                
                 fig_rev = go.Figure(go.Bar(
                     x=top_rev.values,
                     y=top_rev.index,
                     orientation='h',
-                    marker=dict(color=GOLD)
+                    marker=dict(color=GOLD),
+                    text=[format_revenue(val) for val in top_rev.values],  # Add formatted text
+                    textposition='outside',  # Position text outside the bars
+                    textfont=dict(size=11, color=GOLD)
                 ))
                 fig_rev.update_layout(
                     title=f"Top 10 {category} Accounts by Revenue",
@@ -364,7 +380,12 @@ def create_top10_charts(df: pd.DataFrame, category: str):
                     xaxis_title="Revenue ($)",
                     yaxis_title="",
                     showlegend=False,
-                    margin=dict(l=0, r=0, t=40, b=40)
+                    margin=dict(l=0, r=60, t=40, b=40),  # Add right margin for text
+                    xaxis=dict(
+                        range=[0, max(top_rev.values) * 1.15],  # Extend x-axis for text
+                        tickformat=',.0f',  # Format axis labels with commas
+                        tickprefix='$'  # Add dollar prefix to axis
+                    )
                 )
                 st.plotly_chart(fig_rev, use_container_width=True)
 
