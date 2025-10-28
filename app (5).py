@@ -145,7 +145,10 @@ def is_aviation(account_name):
     return False
 
 def calculate_otp(df: pd.DataFrame) -> tuple:
-    """Calculate Gross and Net OTP percentages."""
+    """Calculate Gross and Net OTP percentages.
+    Gross OTP: All QC (Quality Control) shipments
+    Net OTP: Only controllable shipments (excludes certain QC codes)
+    """
     if df.empty:
         return 0.0, 0.0
    
@@ -158,16 +161,38 @@ def calculate_otp(df: pd.DataFrame) -> tuple:
     target_dt = _excel_to_dt(target_col)
     pod_dt = _excel_to_dt(df["POD DATE/TIME"])
    
-    # Calculate OTP
+    # Calculate valid mask (has both target and pod dates)
     valid_mask = target_dt.notna() & pod_dt.notna()
     if not valid_mask.any():
         return 0.0, 0.0
    
-    # Gross OTP: delivered on or before target date
-    gross_otp = (pod_dt <= target_dt).sum() / len(df) * 100
+    # On-time mask: delivered on or before target date
+    ontime_mask = (pod_dt <= target_dt) & valid_mask
    
-    # Net OTP: same but only for valid dates
-    net_otp = ((pod_dt <= target_dt) & valid_mask).sum() / valid_mask.sum() * 100
+    # Gross OTP: All shipments with valid dates (all QC)
+    gross_otp = (ontime_mask.sum() / valid_mask.sum() * 100) if valid_mask.sum() > 0 else 0.0
+   
+    # Net OTP: Only controllable shipments
+    # Check if QC column exists for filtering
+    if 'QC' in df.columns:
+        # Controllable: exclude specific QC codes that are not controllable
+        # Based on reference code, controllables exclude certain QC patterns
+        qc_col = df['QC'].astype(str).str.upper()
+       
+        # Non-controllable patterns (agent, customs, warehouse issues)
+        ctrl_regex = re.compile(r"\b(AGENT|DEL\s*AGT|DELIVERY\s*AGENT|CUSTOMS|WAREHOUSE|W/HOUSE)\b", re.I)
+        non_controllable = qc_col.apply(lambda x: bool(ctrl_regex.search(str(x))) if pd.notna(x) else False)
+       
+        # Controllable mask: valid dates AND not in non-controllable QC codes
+        controllable_mask = valid_mask & ~non_controllable
+       
+        if controllable_mask.sum() > 0:
+            net_otp = ((pod_dt <= target_dt) & controllable_mask).sum() / controllable_mask.sum() * 100
+        else:
+            net_otp = gross_otp  # Fallback to gross if no controllable distinction
+    else:
+        # If no QC column, Net OTP = Gross OTP
+        net_otp = gross_otp
    
     return gross_otp, net_otp
 
@@ -186,11 +211,11 @@ def filter_by_ams(df: pd.DataFrame) -> pd.DataFrame:
    
     return df[mask]
 
-def create_metrics_display(volume, pieces, gross_otp, net_otp, title):
+def create_metrics_display(volume, pieces, gross_otp, net_otp, revenue, title):
     """Create a metrics display for a tab."""
     st.markdown(f"### {title} Metrics")
    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
    
     with col1:
         st.markdown(f"""
@@ -209,22 +234,95 @@ def create_metrics_display(volume, pieces, gross_otp, net_otp, title):
         """, unsafe_allow_html=True)
    
     with col3:
-        color = GREEN if gross_otp >= OTP_TARGET else RED
         st.markdown(f"""
         <div class="kpi">
-            <div class="k-num" style="color:{color}">{gross_otp:.1f}%</div>
-            <div class="k-cap">Gross OTP</div>
+            <div class="k-num">${revenue:,.2f}</div>
+            <div class="k-cap">Total Revenue</div>
         </div>
         """, unsafe_allow_html=True)
    
     with col4:
+        color = GREEN if gross_otp >= OTP_TARGET else RED
+        st.markdown(f"""
+        <div class="kpi">
+            <div class="k-num" style="color:{color}">{gross_otp:.1f}%</div>
+            <div class="k-cap">Gross OTP (All QC)</div>
+        </div>
+        """, unsafe_allow_html=True)
+   
+    with col5:
         color = GREEN if net_otp >= OTP_TARGET else RED
         st.markdown(f"""
         <div class="kpi">
             <div class="k-num" style="color:{color}">{net_otp:.1f}%</div>
-            <div class="k-cap">Net OTP</div>
+            <div class="k-cap">Net OTP (Controllable)</div>
         </div>
         """, unsafe_allow_html=True)
+
+def create_top10_charts(df: pd.DataFrame, title_prefix: str):
+    """Create top 10 charts for accounts by volume and revenue."""
+    if df.empty or 'ACCT NM' not in df.columns:
+        st.warning("No account data available for charts.")
+        return
+   
+    col1, col2 = st.columns(2)
+   
+    with col1:
+        st.markdown(f"#### Top 10 Accounts by Volume")
+        # Count orders per account
+        volume_by_account = df['ACCT NM'].value_counts().head(10)
+       
+        if not volume_by_account.empty:
+            fig_volume = go.Figure(data=[
+                go.Bar(
+                    x=volume_by_account.values,
+                    y=volume_by_account.index,
+                    orientation='h',
+                    marker=dict(color=NAVY),
+                    text=volume_by_account.values,
+                    textposition='auto',
+                )
+            ])
+            fig_volume.update_layout(
+                xaxis_title="Number of Orders",
+                yaxis_title="Account",
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+                yaxis={'categoryorder': 'total ascending'}
+            )
+            st.plotly_chart(fig_volume, use_container_width=True)
+        else:
+            st.info("No volume data available.")
+   
+    with col2:
+        st.markdown(f"#### Top 10 Accounts by Revenue")
+        # Sum revenue per account
+        if 'TOTAL CHARGES' in df.columns:
+            revenue_by_account = df.groupby('ACCT NM')['TOTAL CHARGES'].sum().sort_values(ascending=False).head(10)
+           
+            if not revenue_by_account.empty:
+                fig_revenue = go.Figure(data=[
+                    go.Bar(
+                        x=revenue_by_account.values,
+                        y=revenue_by_account.index,
+                        orientation='h',
+                        marker=dict(color=GOLD),
+                        text=['${:,.0f}'.format(x) for x in revenue_by_account.values],
+                        textposition='auto',
+                    )
+                ])
+                fig_revenue.update_layout(
+                    xaxis_title="Total Revenue ($)",
+                    yaxis_title="Account",
+                    height=400,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    yaxis={'categoryorder': 'total ascending'}
+                )
+                st.plotly_chart(fig_revenue, use_container_width=True)
+            else:
+                st.info("No revenue data available.")
+        else:
+            st.info("TOTAL CHARGES column not found in data.")
 
 # ---------------- File Upload ----------------
 uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls'])
@@ -248,11 +346,13 @@ if uploaded_file is not None:
             # Calculate metrics
             rp_volume = len(rp_df)
             rp_pieces = rp_df['PIECES'].sum() if 'PIECES' in rp_df.columns else 0
+            rp_revenue = rp_df['TOTAL CHARGES'].sum() if 'TOTAL CHARGES' in rp_df.columns else 0.0
             rp_gross_otp, rp_net_otp = calculate_otp(rp_df)
         else:
             rp_df = pd.DataFrame()
             rp_volume = 0
             rp_pieces = 0
+            rp_revenue = 0.0
             rp_gross_otp = 0.0
             rp_net_otp = 0.0
        
@@ -277,11 +377,13 @@ if uploaded_file is not None:
             # Calculate metrics
             lfs_volume = len(lfs_df)
             lfs_pieces = lfs_df['PIECES'].sum() if 'PIECES' in lfs_df.columns else 0
+            lfs_revenue = lfs_df['TOTAL CHARGES'].sum() if 'TOTAL CHARGES' in lfs_df.columns else 0.0
             lfs_gross_otp, lfs_net_otp = calculate_otp(lfs_df)
         else:
             lfs_df = pd.DataFrame()
             lfs_volume = 0
             lfs_pieces = 0
+            lfs_revenue = 0.0
             lfs_gross_otp = 0.0
             lfs_net_otp = 0.0
        
@@ -306,11 +408,13 @@ if uploaded_file is not None:
             # Calculate metrics
             avs_volume = len(avs_df)
             avs_pieces = avs_df['PIECES'].sum() if 'PIECES' in avs_df.columns else 0
+            avs_revenue = avs_df['TOTAL CHARGES'].sum() if 'TOTAL CHARGES' in avs_df.columns else 0.0
             avs_gross_otp, avs_net_otp = calculate_otp(avs_df)
         else:
             avs_df = pd.DataFrame()
             avs_volume = 0
             avs_pieces = 0
+            avs_revenue = 0.0
             avs_gross_otp = 0.0
             avs_net_otp = 0.0
        
@@ -320,7 +424,10 @@ if uploaded_file is not None:
         with tab1:
             st.markdown("## Radiopharma (RP)")
             if not rp_df.empty:
-                create_metrics_display(rp_volume, rp_pieces, rp_gross_otp, rp_net_otp, "September RP")
+                create_metrics_display(rp_volume, rp_pieces, rp_gross_otp, rp_net_otp, rp_revenue, "September RP")
+               
+                st.markdown("---")
+                create_top10_charts(rp_df, "RP")
                
                 with st.expander("📊 View Data Details"):
                     st.markdown(f"**Total Rows:** {len(rp_df):,}")
@@ -332,7 +439,10 @@ if uploaded_file is not None:
         with tab2:
             st.markdown("## Life Sciences (LFS)")
             if not lfs_df.empty:
-                create_metrics_display(lfs_volume, lfs_pieces, lfs_gross_otp, lfs_net_otp, "September LFS")
+                create_metrics_display(lfs_volume, lfs_pieces, lfs_gross_otp, lfs_net_otp, lfs_revenue, "September LFS")
+               
+                st.markdown("---")
+                create_top10_charts(lfs_df, "LFS")
                
                 with st.expander("📊 View Data Details"):
                     st.markdown(f"**Total Rows:** {len(lfs_df):,}")
@@ -344,7 +454,10 @@ if uploaded_file is not None:
         with tab3:
             st.markdown("## Aviation Services (AVS)")
             if not avs_df.empty:
-                create_metrics_display(avs_volume, avs_pieces, avs_gross_otp, avs_net_otp, "September AVS")
+                create_metrics_display(avs_volume, avs_pieces, avs_gross_otp, avs_net_otp, avs_revenue, "September AVS")
+               
+                st.markdown("---")
+                create_top10_charts(avs_df, "AVS")
                
                 with st.expander("📊 View Data Details"):
                     st.markdown(f"**Total Rows:** {len(avs_df):,}")
@@ -357,18 +470,33 @@ if uploaded_file is not None:
         with st.expander("📈 Overall Summary"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("RP Volume", f"{rp_volume:,}")
-                st.metric("RP Pieces", f"{rp_pieces:,}")
+                st.markdown("#### RP (Radiopharma)")
+                st.metric("Volume", f"{rp_volume:,}")
+                st.metric("Pieces", f"{rp_pieces:,}")
+                st.metric("Revenue", f"${rp_revenue:,.2f}")
             with col2:
-                st.metric("LFS Volume", f"{lfs_volume:,}")
-                st.metric("LFS Pieces", f"{lfs_pieces:,}")
+                st.markdown("#### LFS (Life Sciences)")
+                st.metric("Volume", f"{lfs_volume:,}")
+                st.metric("Pieces", f"{lfs_pieces:,}")
+                st.metric("Revenue", f"${lfs_revenue:,.2f}")
             with col3:
-                st.metric("AVS Volume", f"{avs_volume:,}")
-                st.metric("AVS Pieces", f"{avs_pieces:,}")
+                st.markdown("#### AVS (Aviation)")
+                st.metric("Volume", f"{avs_volume:,}")
+                st.metric("Pieces", f"{avs_pieces:,}")
+                st.metric("Revenue", f"${avs_revenue:,.2f}")
            
             st.markdown("---")
-            st.markdown(f"**Total Volume (All):** {rp_volume + lfs_volume + avs_volume:,}")
-            st.markdown(f"**Total Pieces (All):** {rp_pieces + lfs_pieces + avs_pieces:,}")
+            total_volume = rp_volume + lfs_volume + avs_volume
+            total_pieces = rp_pieces + lfs_pieces + avs_pieces
+            total_revenue = rp_revenue + lfs_revenue + avs_revenue
+           
+            col_t1, col_t2, col_t3 = st.columns(3)
+            with col_t1:
+                st.markdown(f"**Total Volume (All):** {total_volume:,}")
+            with col_t2:
+                st.markdown(f"**Total Pieces (All):** {total_pieces:,}")
+            with col_t3:
+                st.markdown(f"**Total Revenue (All):** ${total_revenue:,.2f}")
    
     except Exception as e:
         st.error(f"❌ Error processing file: {str(e)}")
